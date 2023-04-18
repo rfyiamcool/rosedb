@@ -205,7 +205,8 @@ func Open(opts Options) (*RoseDB, error) {
 	// handle log files garbage collection.
 	go db.handleLogFileGC()
 
-	// handle
+	// passively clean up expired entries.
+	// the same as redis's lazy delete mode, when the requested key has expired, it will be deleted passively.
 	go db.passiveExpireHandler()
 	return db, nil
 }
