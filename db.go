@@ -759,8 +759,7 @@ func (db *RoseDB) doRunGC(dataType DataType, specifiedFid int, gcRatio float64) 
 	return nil
 }
 
-func (db *RoseDB) deleteExpireEntry(key []byte, dataType DataType, node *indexNode) {
-	// support string type only，more types in the future.
+func (db *RoseDB) asnycDeleteExpireEntry(key []byte, dataType DataType, node *indexNode) {
 	if dataType != String {
 		return
 	}
@@ -773,41 +772,42 @@ func (db *RoseDB) deleteExpireEntry(key []byte, dataType DataType, node *indexNo
 	}
 }
 
-func (db *RoseDB) passiveExpireHandler() {
-	gc := func(entry *keyIndexNode) {
-		db.strIndex.mu.Lock()
-		defer db.strIndex.mu.Unlock()
-
-		rawValue := db.strIndex.idxTree.Get(entry.key)
-		idxNode := rawValue.(*indexNode)
-		if idxNode == nil {
-			return
-		}
-
-		// the key is already deleted.
-		if idxNode == nil {
-			return
-		}
-
-		// if the two indexNode are equal, delete expired entry.
-		if entry.indexNode.fid == idxNode.fid && entry.indexNode.offset == idxNode.offset {
-			db.delete(entry.key)
-			return
-		}
+func (db *RoseDB) syncDeleteExpireEntry(key []byte, dataType DataType, deleteNode *indexNode) {
+	// support string type only，more types in the future.
+	if dataType != String {
+		return
 	}
 
+	db.strIndex.mu.Lock()
+	defer db.strIndex.mu.Unlock()
+
+	rawValue := db.strIndex.idxTree.Get(key)
+	idxNode := rawValue.(*indexNode)
+	// the key is already deleted.
+	if idxNode == nil {
+		return
+	}
+
+	// not expired
+	if idxNode.expiredAt > time.Now().Unix() {
+		return
+	}
+
+	// if the two indexNode are equal, delete expired entry.
+	if deleteNode.fid == idxNode.fid && deleteNode.offset == idxNode.offset {
+		db.delete(key)
+		return
+	}
+}
+
+func (db *RoseDB) passiveExpireHandler() {
 	for {
 		select {
 		case <-db.closeChan:
 			return
 
 		case entry := <-db.expireChan:
-			// support string type only，more types in the future.
-			if entry.dateType != String {
-				continue
-			}
-
-			gc(entry)
+			db.syncDeleteExpireEntry(entry.key, entry.dateType, entry.indexNode)
 		}
 	}
 }

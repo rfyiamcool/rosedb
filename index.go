@@ -271,7 +271,7 @@ func (db *RoseDB) getVal(idxTree *art.AdaptiveRadixTree,
 
 	ts := time.Now().Unix()
 	if idxNode.expiredAt != 0 && idxNode.expiredAt <= ts {
-		db.deleteExpireEntry(key, dataType, idxNode)
+		db.asnycDeleteExpireEntry(key, dataType, idxNode)
 		return nil, ErrKeyNotFound
 	}
 
