@@ -1,15 +1,16 @@
 package rosedb
 
 import (
-	"github.com/flower-corp/rosedb/ds/art"
-	"github.com/flower-corp/rosedb/logfile"
-	"github.com/flower-corp/rosedb/logger"
-	"github.com/flower-corp/rosedb/util"
 	"io"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/flower-corp/rosedb/ds/art"
+	"github.com/flower-corp/rosedb/logfile"
+	"github.com/flower-corp/rosedb/logger"
+	"github.com/flower-corp/rosedb/util"
 )
 
 // DataType Define the data structure type.
@@ -270,8 +271,10 @@ func (db *RoseDB) getVal(idxTree *art.AdaptiveRadixTree,
 
 	ts := time.Now().Unix()
 	if idxNode.expiredAt != 0 && idxNode.expiredAt <= ts {
+		db.deleteExpireEntry(key, dataType, idxNode)
 		return nil, ErrKeyNotFound
 	}
+
 	// In KeyValueMemMode, the value will be stored in memory.
 	// So get the value from the index info.
 	if db.opts.IndexMode == KeyValueMemMode && len(idxNode.value) != 0 {

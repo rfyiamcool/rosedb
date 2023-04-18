@@ -35,6 +35,7 @@ func (db *RoseDB) Set(key, value []byte) error {
 func (db *RoseDB) Get(key []byte) ([]byte, error) {
 	db.strIndex.mu.RLock()
 	defer db.strIndex.mu.RUnlock()
+
 	return db.getVal(db.strIndex.idxTree, key, String)
 }
 
@@ -133,6 +134,10 @@ func (db *RoseDB) Delete(key []byte) error {
 	db.strIndex.mu.Lock()
 	defer db.strIndex.mu.Unlock()
 
+	return db.delete(key)
+}
+
+func (db *RoseDB) delete(key []byte) error {
 	entry := &logfile.LogEntry{Key: key, Type: logfile.TypeDelete}
 	pos, err := db.writeLogEntry(entry, String)
 	if err != nil {

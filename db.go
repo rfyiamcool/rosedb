@@ -3,12 +3,6 @@ package rosedb
 import (
 	"encoding/binary"
 	"errors"
-	"github.com/flower-corp/rosedb/ds/art"
-	"github.com/flower-corp/rosedb/ds/zset"
-	"github.com/flower-corp/rosedb/flock"
-	"github.com/flower-corp/rosedb/logfile"
-	"github.com/flower-corp/rosedb/logger"
-	"github.com/flower-corp/rosedb/util"
 	"io"
 	"io/ioutil"
 	"math"
@@ -22,6 +16,13 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/flower-corp/rosedb/ds/art"
+	"github.com/flower-corp/rosedb/ds/zset"
+	"github.com/flower-corp/rosedb/flock"
+	"github.com/flower-corp/rosedb/logfile"
+	"github.com/flower-corp/rosedb/logger"
+	"github.com/flower-corp/rosedb/util"
 )
 
 var (
@@ -62,6 +63,7 @@ type (
 		archivedLogFiles map[DataType]archivedFiles
 		fidMap           map[DataType][]uint32 // only used at startup, never update even though log files changed.
 		discards         map[DataType]*discard
+		expireChan       chan *keyIndexNode
 		opts             Options
 		strIndex         *strIndex  // String indexes(adaptive-radix-tree).
 		listIndex        *listIndex // List indexes.
@@ -72,6 +74,7 @@ type (
 		fileLock         *flock.FileLockGuard
 		closed           uint32
 		gcState          int32
+		closeChan        chan struct{}
 	}
 
 	archivedFiles map[uint32]*logfile.LogFile
@@ -93,6 +96,12 @@ type (
 		offset    int64
 		entrySize int
 		expiredAt int64
+	}
+
+	keyIndexNode struct {
+		key       []byte
+		dateType  DataType
+		indexNode *indexNode
 	}
 
 	listIndex struct {
@@ -174,6 +183,8 @@ func Open(opts Options) (*RoseDB, error) {
 		hashIndex:        newHashIdx(),
 		setIndex:         newSetIdx(),
 		zsetIndex:        newZSetIdx(),
+		expireChan:       make(chan *keyIndexNode, opts.DiscardBufferSize),
+		closeChan:        make(chan struct{}, 0),
 	}
 
 	// init discard file.
@@ -193,6 +204,9 @@ func Open(opts Options) (*RoseDB, error) {
 
 	// handle log files garbage collection.
 	go db.handleLogFileGC()
+
+	// handle
+	go db.passiveExpireHandler()
 	return db, nil
 }
 
@@ -200,6 +214,10 @@ func Open(opts Options) (*RoseDB, error) {
 func (db *RoseDB) Close() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+
+	if atomic.LoadUint32(&db.closed) == 1 {
+		return nil
+	}
 
 	if db.fileLock != nil {
 		_ = db.fileLock.Release()
@@ -219,12 +237,18 @@ func (db *RoseDB) Close() error {
 	for _, dis := range db.discards {
 		dis.closeChan()
 	}
-	atomic.StoreUint32(&db.closed, 1)
+
+	// close closeChan
+	close(db.closeChan)
+
+	// reset nil
 	db.strIndex = nil
 	db.hashIndex = nil
 	db.listIndex = nil
 	db.zsetIndex = nil
 	db.setIndex = nil
+
+	atomic.StoreUint32(&db.closed, 1)
 	return nil
 }
 
@@ -733,4 +757,57 @@ func (db *RoseDB) doRunGC(dataType DataType, specifiedFid int, gcRatio float64) 
 		db.discards[dataType].clear(fid)
 	}
 	return nil
+}
+
+func (db *RoseDB) deleteExpireEntry(key []byte, dataType DataType, node *indexNode) {
+	// support string type only，more types in the future.
+	if dataType != String {
+		return
+	}
+
+	entry := &keyIndexNode{key: key, dateType: dataType, indexNode: node}
+	select {
+	case db.expireChan <- entry:
+	default:
+		return
+	}
+}
+
+func (db *RoseDB) passiveExpireHandler() {
+	gc := func(entry *keyIndexNode) {
+		db.strIndex.mu.Lock()
+		defer db.strIndex.mu.Unlock()
+
+		rawValue := db.strIndex.idxTree.Get(entry.key)
+		idxNode := rawValue.(*indexNode)
+		if idxNode == nil {
+			return
+		}
+
+		// the key is already deleted.
+		if idxNode == nil {
+			return
+		}
+
+		// if the two indexNode are equal, delete expired entry.
+		if entry.indexNode.fid == idxNode.fid && entry.indexNode.offset == idxNode.offset {
+			db.delete(entry.key)
+			return
+		}
+	}
+
+	for {
+		select {
+		case <-db.closeChan:
+			return
+
+		case entry := <-db.expireChan:
+			// support string type only，more types in the future.
+			if entry.dateType != String {
+				continue
+			}
+
+			gc(entry)
+		}
+	}
 }
